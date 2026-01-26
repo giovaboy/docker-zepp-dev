@@ -66,6 +66,18 @@ TELEGRAM_ALLOWED_USERS=your_user_id_here
 
 ### 3. Start
 
+## 🐳 Pre-built Docker Image
+
+Available on Docker Hub:
+
+```bash
+docker pull giovaboy/zepp-dev:latest
+Or use directly in docker-compose.yml:
+services:
+  zepp-dev:
+    image: giovaboy/zepp-dev:latest
+    # ... rest of config
+
 ```bash
 docker-compose build
 docker-compose up -d
