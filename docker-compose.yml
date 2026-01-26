@@ -1,0 +1,27 @@
+services:
+  zepp-dev:
+    build: .
+    container_name: zepp-dev
+    environment:
+      PUID: "${PUID}"
+      PGID: "${PGID}"
+      TZ: "${TZ}"
+      WEBHOOK_SECRET: "${WEBHOOK_SECRET}"
+      GITHUB_USER: "${GITHUB_USER}"
+      GITHUB_TOKEN: "${GITHUB_TOKEN}"
+      # Comma-separated list of repositories
+      GITHUB_REPOS: "${GITHUB_REPOS}"
+      # Telegram Bot Token (optional - get from @BotFather)
+      TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
+      # Telegram User Whitelist (optional - comma-separated user IDs)
+      TELEGRAM_ALLOWED_USERS: "${TELEGRAM_ALLOWED_USERS:-}"
+    volumes:
+      # Mount the entire workspace directory
+      - ./workspace:/workspace
+      - ./.zepp-config:/root/.zepp
+    tty: true
+    stdin_open: true
+    command: ["bash"]
+    restart: unless-stopped
+    ports:
+      - "49000:49000"

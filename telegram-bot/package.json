@@ -1,0 +1,16 @@
+{
+  "name": "zepp-telegram-bot",
+  "version": "1.0.0",
+  "description": "Telegram bot for ZeppOS development - Preview QR codes on mobile",
+  "main": "bot.js",
+  "scripts": {
+    "start": "node bot.js"
+  },
+  "dependencies": {
+    "telegraf": "^4.15.0",
+    "canvas": "^2.11.2",
+    "dotenv": "^16.3.1"
+  },
+  "author": "",
+  "license": "MIT"
+}
