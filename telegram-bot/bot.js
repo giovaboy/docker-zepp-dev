@@ -272,6 +272,7 @@ bot.command('start', (ctx) => {
     'Available commands:\n' +
     '/preview - Start preview on device\n' +
     '/build - Build .zab package\n' +
+    '/update - Update repository\n' +
     '/abort - Abort active process\n' +
     '/status - Check status\n' +
     '/repos - List repositories\n' +
@@ -305,6 +306,164 @@ bot.command('repos', (ctx) => {
 
   const repoList = REPOS.map((r, i) => `${i + 1}. ${r}`).join('\n');
   ctx.reply(`📦 *Available Repositories:*\n\n${repoList}`, { parse_mode: 'Markdown' });
+});
+
+// Update repository command
+bot.command('update', async (ctx) => {
+  if (REPOS.length === 0) {
+    return ctx.reply('❌ No repositories configured');
+  }
+
+  // Create inline keyboard for repository selection
+  const keyboard = REPOS.map(repo => ([{
+    text: `🔄 ${repo}`,
+    callback_data: `update:repo:${repo}`
+  }]));
+
+  ctx.reply('Select repository to update:', {
+    reply_markup: {
+      inline_keyboard: keyboard
+    }
+  });
+});
+
+// Handle update repository selection
+bot.action(/update:repo:(.+)/, async (ctx) => {
+  const repo = ctx.match[1];
+  const chatId = ctx.chat.id;
+  const username = ctx.from.username || ctx.from.first_name || 'Unknown';
+
+  await ctx.answerCbQuery();
+
+  const repoPath = getRepoPath(repo);
+  
+  console.log(`[TELEGRAM UPDATE] User: ${username}, Repo: ${repo}, Path: ${repoPath}`);
+
+  // Send updating message
+  const statusMsg = await ctx.reply('🔄 Updating repository, please wait...');
+
+  try {
+    console.log(`[TELEGRAM UPDATE] Starting git fetch for ${repo}...`);
+    
+    // Step 1: Fetch from origin
+    const gitFetch = spawn('git', ['fetch', 'origin'], {
+      cwd: repoPath,
+      shell: true
+    });
+
+    let fetchOutput = '';
+    let fetchError = '';
+
+    gitFetch.stdout.on('data', (data) => {
+      const text = data.toString();
+      fetchOutput += text;
+      console.log(`[TELEGRAM UPDATE] [${repo}] fetch stdout: ${text.trim()}`);
+    });
+
+    gitFetch.stderr.on('data', (data) => {
+      const text = data.toString();
+      fetchError += text;
+      console.log(`[TELEGRAM UPDATE] [${repo}] fetch stderr: ${text.trim()}`);
+    });
+
+    gitFetch.on('close', async (fetchCode) => {
+      console.log(`[TELEGRAM UPDATE] [${repo}] fetch closed with code: ${fetchCode}`);
+      
+      if (fetchCode !== 0) {
+        console.error(`[TELEGRAM UPDATE] [${repo}] fetch failed:`, fetchError);
+        await ctx.telegram.editMessageText(
+          chatId,
+          statusMsg.message_id,
+          undefined,
+          `❌ Update failed (fetch)\n\nRepo: ${repo}\nError: ${fetchError || fetchOutput || 'Unknown error'}`
+        );
+        return;
+      }
+
+      console.log(`[TELEGRAM UPDATE] [${repo}] Fetch successful, starting reset...`);
+
+      // Step 2: Reset to origin/main
+      const gitReset = spawn('git', ['reset', '--hard', 'origin/main'], {
+        cwd: repoPath,
+        shell: true
+      });
+
+      let resetOutput = '';
+      let resetError = '';
+
+      gitReset.stdout.on('data', (data) => {
+        const text = data.toString();
+        resetOutput += text;
+        console.log(`[TELEGRAM UPDATE] [${repo}] reset stdout: ${text.trim()}`);
+      });
+
+      gitReset.stderr.on('data', (data) => {
+        const text = data.toString();
+        resetError += text;
+        console.log(`[TELEGRAM UPDATE] [${repo}] reset stderr: ${text.trim()}`);
+      });
+
+      gitReset.on('close', async (resetCode) => {
+        console.log(`[TELEGRAM UPDATE] [${repo}] reset closed with code: ${resetCode}`);
+        
+        if (resetCode !== 0) {
+          console.error(`[TELEGRAM UPDATE] [${repo}] reset failed:`, resetError);
+          await ctx.telegram.editMessageText(
+            chatId,
+            statusMsg.message_id,
+            undefined,
+            `❌ Update failed (reset)\n\nRepo: ${repo}\nError: ${resetError || resetOutput || 'Unknown error'}`
+          );
+          return;
+        }
+
+        console.log(`[TELEGRAM UPDATE] [${repo}] Reset successful!`);
+
+        // Check if anything changed
+        const wasUpdated = resetOutput.includes('HEAD is now at');
+        const alreadyUpToDate = fetchOutput.includes('Already up to date') || 
+                                fetchOutput.trim() === '';
+
+        if (alreadyUpToDate && resetOutput.includes('HEAD is now at')) {
+          // Already up to date
+          console.log(`[TELEGRAM UPDATE] [${repo}] Already up to date`);
+          await ctx.telegram.editMessageText(
+            chatId,
+            statusMsg.message_id,
+            undefined,
+            `✅ Repository '${repo}' is already up to date\n\n${resetOutput.trim()}`
+          );
+        } else if (wasUpdated) {
+          // Updated successfully
+          console.log(`[TELEGRAM UPDATE] [${repo}] Updated successfully`);
+          await ctx.telegram.editMessageText(
+            chatId,
+            statusMsg.message_id,
+            undefined,
+            `✅ Repository '${repo}' updated successfully!\n\n${resetOutput.trim()}`
+          );
+        } else {
+          // Generic success
+          console.log(`[TELEGRAM UPDATE] [${repo}] Update completed`);
+          await ctx.telegram.editMessageText(
+            chatId,
+            statusMsg.message_id,
+            undefined,
+            `✅ Repository '${repo}' synchronized\n\n${resetOutput.trim() || 'No changes detected'}`
+          );
+        }
+      });
+    });
+
+  } catch (err) {
+    console.error(`[TELEGRAM UPDATE] [${repo}] Exception:`, err);
+    await ctx.telegram.editMessageText(
+      chatId,
+      statusMsg.message_id,
+      undefined,
+      `❌ Error: ${err.message}\n\nRepo: ${repo}`
+    );
+  }
 });
 
 // Build command
