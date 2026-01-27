@@ -577,6 +577,16 @@ app.get("/", (req, res) => {
             transform: translateY(-2px);
             box-shadow: 0 4px 8px rgba(76, 175, 80, 0.3);
           }
+          .btn-update {
+            background: #9C27B0;
+            color: white;
+          }
+          .btn-update:hover:not(:disabled),
+          .btn-update:active:not(:disabled) {
+            background: #7B1FA2;
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(156, 39, 176, 0.3);
+          }
           .btn-build {
             background: #FF9800;
             color: white;
@@ -622,6 +632,22 @@ app.get("/", (req, res) => {
             background: #2a2a2a;
             border-radius: 5px;
             border: 1px solid #444;
+          }
+          .update-result {
+            padding: 15px;
+            background: #2a2a2a;
+            border-radius: 5px;
+            border: 1px solid #444;
+            margin-top: 15px;
+          }
+          #update-info {
+            padding: 10px;
+            background: #222;
+            border-radius: 3px;
+            font-family: monospace;
+            font-size: 13px;
+            line-height: 1.5;
+            word-break: break-word;
           }
           #build-info {
             padding: 10px;
@@ -776,7 +802,18 @@ app.get("/", (req, res) => {
           </div>
         </div>
         
-        <!-- 3. Build Distribution Container -->
+        <!-- 3. Update Repository Container -->
+        <div class="section-container">
+          <h2>🔄 Update Repository</h2>
+          <div class="update-controls">
+            <button class="btn btn-update" onclick="updateRepo()">🔄 Update from Git</button>
+          </div>
+          <div class="update-result" id="update-result" style="display: none;">
+            <div id="update-info"></div>
+          </div>
+        </div>
+        
+        <!-- 4. Build Distribution Container -->
         <div class="section-container">
           <h2>📦 Build Distribution Package</h2>
           <div class="build-controls">
@@ -936,6 +973,63 @@ app.get("/", (req, res) => {
               console.error('Abort failed:', err);
               abortBtn.disabled = false;
               abortBtn.innerText = '⏹️ Abort Build';
+            });
+          }
+          
+          function updateRepo() {
+            const repo = document.getElementById('repo-select').value;
+            if (!repo) {
+              document.getElementById('status').innerText = '⚠️ Please select a repository first';
+              document.getElementById('status').className = 'status warning';
+              return;
+            }
+            
+            const updateResult = document.getElementById('update-result');
+            const updateInfo = document.getElementById('update-info');
+            
+            updateResult.style.display = 'block';
+            updateInfo.innerHTML = '<div class="loading">🔄 Updating repository...</div>';
+            
+            document.getElementById('status').innerText = '🔄 Updating repository from Git...';
+            document.getElementById('status').className = 'status building';
+            
+            fetch('/update-repo', {
+              method: 'POST',
+              headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ repo: repo })
+            })
+            .then(function(res) { return res.json(); })
+            .then(function(data) {
+              if (data.success) {
+                var commitInfo = data.commit 
+                  ? '<br><small>Commit: ' + data.commit.substring(0, 7) + '</small>' 
+                  : '';
+                
+                updateInfo.innerHTML = 
+                  '<div class="success-message">' +
+                    '✅ ' + data.message + commitInfo +
+                  '</div>';
+                
+                document.getElementById('status').innerText = '✅ Repository "' + repo + '" updated successfully';
+                document.getElementById('status').className = 'status ready';
+              } else {
+                updateInfo.innerHTML = 
+                  '<div class="error-message">' +
+                    '❌ Update failed: ' + data.error +
+                  '</div>';
+                
+                document.getElementById('status').innerText = '❌ Update failed';
+                document.getElementById('status').className = 'status error';
+              }
+            })
+            .catch(function(err) {
+              updateInfo.innerHTML = 
+                '<div class="error-message">' +
+                  '❌ Error: ' + err.message +
+                '</div>';
+              
+              document.getElementById('status').innerText = '❌ Update error';
+              document.getElementById('status').className = 'status error';
             });
           }
           
@@ -1452,6 +1546,50 @@ app.get("/repos", (req, res) => {
     configured_repositories: REPOS,
     workspace_path: WORKSPACE_DIR
   });
+});
+
+// --- UPDATE REPOSITORY ENDPOINT ---
+app.post("/update-repo", bodyParser.json(), async (req, res) => {
+  const { repo } = req.body;
+
+  if (!repo) {
+    return res.status(400).json({
+      success: false,
+      error: "Repository name is required"
+    });
+  }
+
+  if (!REPOS.includes(repo)) {
+    return res.status(404).json({
+      success: false,
+      error: `Repository '${repo}' not found in configuration`
+    });
+  }
+
+  console.log(`[UPDATE] Manual update requested for repository: ${repo}`);
+
+  try {
+    const result = await updateRepository(repo);
+    
+    if (result.success) {
+      res.status(200).json({
+        success: true,
+        message: `Repository '${repo}' updated successfully`,
+        commit: result.commit
+      });
+    } else {
+      res.status(500).json({
+        success: false,
+        error: result.error
+      });
+    }
+  } catch (err) {
+    console.error(`[UPDATE] Error updating ${repo}:`, err);
+    res.status(500).json({
+      success: false,
+      error: err.message
+    });
+  }
 });
 
 // Start server only if run directly (not required)
