@@ -262,6 +262,13 @@ function getRepoPath(repoName) {
   return path.join(WORKSPACE_DIR, repoName);
 }
 
+// Escape special characters for Telegram's legacy Markdown parse mode
+// (repo/device names are user-controlled data, not formatting, so any
+// _ * ` [ they contain must not be read as Markdown syntax)
+function escapeMarkdown(text) {
+  return String(text).replace(/([_*`\[])/g, '\\$1');
+}
+
 // Start command
 bot.command('start', (ctx) => {
   const userId = ctx.from.id;
@@ -304,7 +311,7 @@ bot.command('repos', (ctx) => {
     return ctx.reply('❌ No repositories configured');
   }
 
-  const repoList = REPOS.map((r, i) => `${i + 1}. ${r}`).join('\n');
+  const repoList = REPOS.map((r, i) => `${i + 1}. ${escapeMarkdown(r)}`).join('\n');
   ctx.reply(`📦 *Available Repositories:*\n\n${repoList}`, { parse_mode: 'Markdown' });
 });
 
@@ -810,12 +817,12 @@ bot.command('status', (ctx) => {
   }
 
   const sessionType = session.device ? '▶️ Preview' : '🔨 Build';
-  const deviceInfo = session.device ? `\nDevice: ${session.device}` : '';
+  const deviceInfo = session.device ? `\nDevice: ${escapeMarkdown(session.device)}` : '';
 
   ctx.reply(
     `⏳ *Active Session*\n\n` +
     `Type: ${sessionType}\n` +
-    `Repository: ${session.repo}${deviceInfo}`,
+    `Repository: ${escapeMarkdown(session.repo)}${deviceInfo}`,
     { parse_mode: 'Markdown' }
   );
 });
