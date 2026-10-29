@@ -1,0 +1,8 @@
+# Secrets
+.env
+
+# Runtime data mounted into the container
+workspace/
+.zepp-config/
+
+node_modules/
