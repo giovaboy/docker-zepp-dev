@@ -64,7 +64,31 @@ TELEGRAM_ALLOWED_USERS=your_user_id_here
 # 4. Restart: docker-compose restart
 ```
 
+**🔒 Protect the web interface (recommended if port 49000 is exposed):**
+```bash
+# In .env - enables HTTP Basic Auth (the GitHub webhook route stays
+# open, it is protected by WEBHOOK_SECRET instead)
+WEB_AUTH_USER=admin
+WEB_AUTH_PASS=a_strong_password
+```
+
+**⚡ Defaults for `/quick` (optional):**
+```bash
+# Used until you pick a repo/device once; after that the bot remembers your last choice
+DEFAULT_REPO=repo1
+DEFAULT_DEVICE=Amazfit Balance
+DEFAULT_BRANCH=main
+```
+
 ### 3. Start
+
+```bash
+docker-compose build
+docker-compose up -d
+docker-compose logs -f
+```
+
+Webhook server and Telegram bot are restarted automatically if they crash.
 
 ## 🐳 Pre-built Docker Image
 
@@ -72,16 +96,14 @@ Available on Docker Hub:
 
 ```bash
 docker pull giovaboy/zepp-dev:latest
-Or use directly in docker-compose.yml:
+```
+
+Or use it directly in docker-compose.yml:
+```yaml
 services:
   zepp-dev:
     image: giovaboy/zepp-dev:latest
     # ... rest of config
-
-```bash
-docker-compose build
-docker-compose up -d
-docker-compose logs -f
 ```
 
 ## 📱 Using Telegram Bot
@@ -120,12 +142,25 @@ Bot: 🔨 Building...
 You: *download/share*
 ```
 
+**Quick Preview (update + preview in one step):**
+```
+/quick                 → last repo + last device
+/quick zhue            → repo "zhue", last device
+/quick zhue+bal3       → repo "zhue", device matching "bal3"
+/quick +gtr4           → last repo, device matching "gtr4"
+```
+Names are matched fuzzily; if a query is ambiguous the bot asks with buttons.
+`/q` is a shortcut for `/quick`.
+
 **Available Commands:**
+- `/quick` (`/q`) - Update repository + preview, remembers last choice
 - `/preview` - Quick device preview with QR code (shows expiry!)
 - `/build` - Build .zab distribution package
+- `/update` - Update repository from Git
 - `/abort` - Cancel active process
 - `/status` - Check current session
 - `/repos` - List repositories
+- `/myid` - Show your Telegram user ID
 
 ## 🌐 Using Web Interface
 

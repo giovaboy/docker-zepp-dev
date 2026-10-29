@@ -4,59 +4,67 @@ set -e
 
 WEBHOOK_SCRIPT="/webhook/webhook.js"
 
+# Run a node script in the background and restart it if it exits
+supervise() {
+    local name="$1"
+    local script="$2"
+    (
+        while true; do
+            node "$script"
+            echo "⚠️  $name exited (code $?), restarting in 5s..."
+            sleep 5
+        done
+    ) &
+}
+
 echo "========================================="
 echo "  Zepp Development Container Starting"
 echo "========================================="
 
 # 0. Configure Git globally to trust workspace directories
 echo ""
-echo "--- ⚙️  0/6: Configuring Git security... ---"
+echo "--- ⚙️  0/5: Configuring Git security... ---"
 git config --global --add safe.directory '*' 2>/dev/null || true
 echo "✓ Git security configured"
 
-# 1. Discover available Zeus devices
+# 1. Initialize multiple repositories
 echo ""
-echo "--- 🔍 1/6: Discovering Zeus devices... ---"
-/usr/local/bin/discover-devices.sh
-
-# 2. Initialize multiple repositories
-echo ""
-echo "--- 🚀 2/6: Repository initialization... ---"
+echo "--- 🚀 1/5: Repository initialization... ---"
 
 if [ -n "$GITHUB_REPOS" ]; then
     echo "Initializing GitHub repositories..."
     /usr/local/bin/init-repos.sh
-    
+
     if [ $? -ne 0 ]; then
         echo "ERROR: Repository initialization failed"
         exit 1
     fi
-    
+
     echo "✓ All repositories initialized successfully"
 else
     echo "WARNING: GITHUB_REPOS not set, skipping repository initialization"
 fi
 
-# 3. Run initial setup for each repository
+# 2. Run initial setup for each repository
 echo ""
-echo "--- 🔧 3/6: Running initial setup for each repository... ---"
+echo "--- 🔧 2/5: Running initial setup for each repository... ---"
 
 if [ -n "$GITHUB_REPOS" ]; then
     # Split repositories by comma and process each one
     IFS=',' read -ra REPOS <<< "$GITHUB_REPOS"
-    
+
     for repo in "${REPOS[@]}"; do
         # Trim whitespace
         repo=$(echo "$repo" | xargs)
-        
+
         if [ -z "$repo" ]; then
             continue
         fi
-        
+
         REPO_DIR="/workspace/$repo"
-        
+
         echo "Processing $repo..."
-        
+
         # Check if package.json exists
         if [ -f "$REPO_DIR/package.json" ]; then
             echo "  → Running npm ci for $repo..."
@@ -65,28 +73,14 @@ if [ -n "$GITHUB_REPOS" ]; then
         else
             echo "  ℹ No package.json found in $repo, skipping npm install"
         fi
-        
+
         # Ensure git directory is safe
         git config --global --add safe.directory "$REPO_DIR" 2>/dev/null || true
     done
-    
+
     echo "✓ Initial setup completed for all repositories"
 else
     echo "⚠ No repositories configured, skipping setup"
-fi
-
-# 2.5. Update device list (optional)
-echo ""
-echo "--- 📱 2.6/6: Updating device list... ---"
-
-if [ "$UPDATE_DEVICES" = "true" ]; then
-    echo "Updating devices from Zeus CLI..."
-    /usr/local/bin/update-devices.sh || echo "⚠ Device update failed, keeping current list"
-else
-    echo "ℹ UPDATE_DEVICES not set to 'true', skipping auto-update"
-    echo "  Current devices.json will be used"
-    echo "  To update: set UPDATE_DEVICES=true or run manually:"
-    echo "  docker-compose exec zepp-dev /usr/local/bin/update-devices.sh"
 fi
 
 # 3. Start the webhook server
@@ -94,10 +88,10 @@ echo ""
 echo "--- 🌐 3/5: Starting webhook server... ---"
 
 if [ -f "$WEBHOOK_SCRIPT" ]; then
-    # Start webhook in background
-    node $WEBHOOK_SCRIPT &
+    # Start webhook in background (auto-restart on crash)
+    supervise "Webhook server" "$WEBHOOK_SCRIPT"
     WEBHOOK_PID=$!
-    
+
     echo "✓ Webhook server started (PID: $WEBHOOK_PID)"
 else
     echo "⚠ Webhook script not found at $WEBHOOK_SCRIPT"
@@ -111,11 +105,10 @@ TELEGRAM_BOT_SCRIPT="/telegram-bot/bot.js"
 
 if [ -n "$TELEGRAM_BOT_TOKEN" ]; then
     if [ -f "$TELEGRAM_BOT_SCRIPT" ]; then
-        # Start Telegram bot in background
-        cd /telegram-bot
-        node bot.js &
+        # Start Telegram bot in background (auto-restart on crash)
+        supervise "Telegram bot" "$TELEGRAM_BOT_SCRIPT"
         TELEGRAM_BOT_PID=$!
-        
+
         echo "✓ Telegram bot started (PID: $TELEGRAM_BOT_PID)"
     else
         echo "⚠ Telegram bot script not found at $TELEGRAM_BOT_SCRIPT"

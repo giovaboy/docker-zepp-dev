@@ -4,7 +4,7 @@ const { spawn } = require("child_process");
 const util = require('util');
 const exec = util.promisify(require('child_process').exec);
 const bodyParser = require("body-parser");
-const simpleGit = require("simple-git");
+const { simpleGit } = require("simple-git");
 const process = require("process");
 const path = require("path");
 const fs = require("fs");
@@ -15,7 +15,7 @@ const TOKEN = process.env.GITHUB_TOKEN;
 const PORT = 49000;
 
 // Parse multiple repositories from environment variable
-const REPOS = process.env.GITHUB_REPOS 
+const REPOS = process.env.GITHUB_REPOS
   ? process.env.GITHUB_REPOS.split(',').map(r => r.trim()).filter(Boolean)
   : [];
 
@@ -38,7 +38,7 @@ try {
       .map(d => d.productName)
       .filter((name, index, self) => self.indexOf(name) === index) // Remove duplicates
       .sort(); // Sort alphabetically
-    
+
     console.log(`✅ Loaded ${availableDevices.length} devices from Zeus config`);
   } else {
     throw new Error('.zeus_devices file not found');
@@ -68,19 +68,64 @@ const ansiRegex = ({onlyFirst = false} = {}) => {
   return new RegExp(pattern, onlyFirst ? undefined : 'g');
 };
 
-// Use JSON body parser for most routes
-app.use(express.json());
+// Use JSON body parser for every route except the GitHub webhook (POST /),
+// which needs the raw body to verify the HMAC signature
+const jsonParser = express.json();
+app.use((req, res, next) => {
+  if (req.method === 'POST' && req.path === '/') return next();
+  return jsonParser(req, res, next);
+});
+
+// Log every request with the client IP
+app.use((req, res, next) => {
+  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+  console.log(`📡 [${new Date().toISOString()}] ${req.method} ${req.path} from ${ip}`);
+  next();
+});
+
+const AUTH_USER = process.env.WEB_AUTH_USER;
+const AUTH_PASS = process.env.WEB_AUTH_PASS;
+
+if (AUTH_USER && AUTH_PASS) {
+  app.use((req, res, next) => {
+    // Let the GitHub webhook through without Basic Auth:
+    // it is already protected by the HMAC signature check (verifySignature)
+    if (req.method === 'POST' && req.path === '/') {
+      return next();
+    }
+
+    const auth = req.headers.authorization;
+    if (!auth || !auth.startsWith('Basic ')) {
+      res.set('WWW-Authenticate', 'Basic realm="Zepp Dev"');
+      return res.status(401).send('Authentication required');
+    }
+    // Split on the first colon only: the password itself may contain ':'
+    const [user, ...rest] = Buffer.from(auth.split(' ')[1], 'base64').toString().split(':');
+    const pass = rest.join(':');
+    if (user !== AUTH_USER || pass !== AUTH_PASS) {
+      res.set('WWW-Authenticate', 'Basic realm="Zepp Dev"');
+      return res.status(401).send('Invalid credentials');
+    }
+    next();
+  });
+  console.log('🔒 Web interface protected with Basic Auth (webhook route excluded)');
+} else {
+  console.warn('⚠️  WEB_AUTH_USER/WEB_AUTH_PASS not set - web interface is UNPROTECTED!');
+}
 
 function verifySignature(req) {
   const signature = req.headers["x-hub-signature-256"];
-  if (!signature) return false;
+  if (!SECRET || !signature || !Buffer.isBuffer(req.body)) return false;
 
   const digest = "sha256=" +
     crypto.createHmac("sha256", SECRET)
           .update(req.body)
           .digest("hex");
 
-  return crypto.timingSafeEqual(Buffer.from(signature), Buffer.from(digest));
+  const a = Buffer.from(signature);
+  const b = Buffer.from(digest);
+  // timingSafeEqual throws when lengths differ
+  return a.length === b.length && crypto.timingSafeEqual(a, b);
 }
 
 // Utility function to get repository path
@@ -135,7 +180,7 @@ async function updateRepository(repoName, branch = "main") {
 // Auto clone repositories at startup if missing
 async function ensureRepo() {
   console.log("⚙️  Checking repositories configuration...");
-  
+
   // Configure Git to trust all workspace directories globally
   console.log("⚙️  Configuring Git to trust workspace directories...");
   try {
@@ -144,7 +189,7 @@ async function ensureRepo() {
   } catch (e) {
     console.warn("⚠️  Could not configure global Git security (might be already configured)");
   }
-  
+
   if (REPOS.length === 0) {
     console.warn("⚠️  No repositories configured in GITHUB_REPOS");
     return;
@@ -181,7 +226,7 @@ async function ensureRepo() {
 // Initial update for all repositories
 async function runInitialUpdate() {
   console.log("🔧 Starting initial update for all repositories...");
-  
+
   if (REPOS.length === 0) {
     console.warn("⚠️  No repositories to update");
     return false;
@@ -208,21 +253,21 @@ async function runInitialUpdate() {
 // --- ABORT ENDPOINT ---
 app.post("/abort", (req, res) => {
   const sessionId = req.headers['x-session-id'];
-  
+
   if (!sessionId) {
     return res.status(400).json({ success: false, error: 'No session ID provided' });
   }
-  
+
   const session = activeProcesses.get(sessionId);
-  
+
   if (!session) {
     return res.json({ success: true, message: 'No active process found' });
   }
-  
+
   try {
     // Handle both preview (direct process) and build (status object with process)
     let processToKill;
-    
+
     if (session.process) {
       // Build session - has status object with process property
       processToKill = session.process;
@@ -232,17 +277,17 @@ app.post("/abort", (req, res) => {
       // Preview session - is the process directly
       processToKill = session;
     }
-    
+
     // Kill the Zeus process
     if (processToKill && !processToKill.killed) {
       processToKill.kill('SIGTERM');
     }
-    
+
     // Remove from active processes
     activeProcesses.delete(sessionId);
-    
+
     console.log(`🛑 Aborted process for session: ${sessionId}`);
-    
+
     res.json({ success: true, message: 'Process aborted successfully' });
   } catch (err) {
     console.error(`Error aborting process for session ${sessionId}:`, err);
@@ -253,16 +298,16 @@ app.post("/abort", (req, res) => {
 // --- BUILD ZAB ENDPOINT ---
 app.post("/build", async (req, res) => {
   const { repo } = req.body;
-  
+
   if (!repo || !REPOS.includes(repo)) {
     return res.status(400).json({ success: false, error: `Invalid repository: ${repo}. Available: ${REPOS.join(', ')}` });
   }
-  
+
   const repoPath = getRepoPath(repo);
   const sessionId = `build-${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-  
+
   console.log(`🔨 Starting Zeus build for repository: ${repo}, session: ${sessionId}`);
-  
+
   // Initialize build status
   const buildStatus = {
     status: 'building',
@@ -270,37 +315,37 @@ app.post("/build", async (req, res) => {
     startTime: Date.now(),
     process: null
   };
-  
+
   // Respond immediately with sessionId
   res.json({
     success: true,
     sessionId: sessionId,
     status: 'building'
   });
-  
+
   // Start build in background
   const zeusBuild = spawn('zeus', ['build'], {
     cwd: repoPath,
     shell: true,
     env: { ...process.env }
   });
-  
+
   // Store process in status object
   buildStatus.process = zeusBuild;
   activeProcesses.set(sessionId, buildStatus);
   console.log(`📝 Registered build process for session: ${sessionId}`);
-  
+
   let stdout = '';
   let stderr = '';
-  
+
   zeusBuild.stdout.on('data', (data) => {
     stdout += data.toString();
   });
-  
+
   zeusBuild.stderr.on('data', (data) => {
     stderr += data.toString();
   });
-  
+
   // Safety timeout
   const buildTimeout = setTimeout(() => {
     if (!zeusBuild.killed) {
@@ -310,37 +355,37 @@ app.post("/build", async (req, res) => {
       buildStatus.error = 'Build timeout after 5 minutes';
     }
   }, 300000); // 5 minutes
-  
+
   // Handle process completion
   zeusBuild.on('close', (code) => {
     clearTimeout(buildTimeout);
     console.log(`🧹 Build process closed for session: ${sessionId}, exit code: ${code}`);
-    
+
     if (code !== 0) {
       buildStatus.status = 'error';
       buildStatus.error = `Build failed with exit code ${code}. ${stderr || stdout}`;
       return;
     }
-    
+
     try {
       const distPath = path.join(repoPath, 'dist');
-      
+
       if (!fs.existsSync(distPath)) {
         throw new Error('dist folder not found after build');
       }
-      
+
       const files = fs.readdirSync(distPath);
       const zabFile = files.find(f => f.endsWith('.zab'));
-      
+
       if (!zabFile) {
         throw new Error('No .zab file found in dist folder');
       }
-      
+
       const zabPath = path.join(distPath, zabFile);
       const zabStats = fs.statSync(zabPath);
-      
+
       console.log(`✅ Build successful for ${repo}: ${zabFile} (${zabStats.size} bytes)`);
-      
+
       buildStatus.status = 'completed';
       buildStatus.filename = zabFile;
       buildStatus.size = zabStats.size;
@@ -357,22 +402,22 @@ app.post("/build", async (req, res) => {
 app.get("/build-status/:sessionId", (req, res) => {
   const { sessionId } = req.params;
   const buildStatus = activeProcesses.get(sessionId);
-  
+
   if (!buildStatus) {
-    return res.status(404).json({ 
-      success: false, 
-      error: 'Build session not found' 
+    return res.status(404).json({
+      success: false,
+      error: 'Build session not found'
     });
   }
-  
+
   // Return status without the process object
   const { process, ...statusInfo } = buildStatus;
-  
+
   res.json({
     success: true,
     ...statusInfo
   });
-  
+
   // Clean up completed/errored builds after 30 seconds
   if (buildStatus.status === 'completed' || buildStatus.status === 'error') {
     setTimeout(() => {
@@ -386,23 +431,23 @@ app.get("/build-status/:sessionId", (req, res) => {
 // --- DOWNLOAD ZAB ENDPOINT ---
 app.get("/download/:repo/:filename", (req, res) => {
   const { repo, filename } = req.params;
-  
+
   if (!REPOS.includes(repo)) {
     return res.status(404).send('Repository not found');
   }
-  
-  if (!filename.endsWith('.zab')) {
-    return res.status(400).send('Invalid file type');
+
+  if (!filename.endsWith('.zab') || filename !== path.basename(filename)) {
+    return res.status(400).send('Invalid file name');
   }
-  
+
   const zabPath = path.join(getRepoPath(repo), 'dist', filename);
-  
+
   if (!fs.existsSync(zabPath)) {
     return res.status(404).send('File not found');
   }
-  
+
   console.log(`📥 Downloading ${filename} for ${repo}`);
-  
+
   res.download(zabPath, filename, (err) => {
     if (err) {
       console.error('Download error:', err);
@@ -417,10 +462,10 @@ app.get("/download/:repo/:filename", (req, res) => {
 app.get("/", (req, res) => {
   // Get repository name from query parameter, default to first repo
   const repoName = req.query.repo || REPOS[0];
-  
+
   // Get device target from query parameter, default to Amazfit Balance
   const deviceTarget = req.query.device || "Amazfit Balance";
-  
+
   if (!repoName || !REPOS.includes(repoName)) {
     return res.status(400).send(`Invalid repository. Available: ${REPOS.join(', ')}`);
   }
@@ -470,7 +515,7 @@ app.get("/", (req, res) => {
             white-space: pre;
             overflow-x: auto;
           }
-          
+
           /* Section Containers */
           .section-container {
             margin-bottom: 15px;
@@ -488,7 +533,7 @@ app.get("/", (req, res) => {
             border-bottom: 2px solid #333;
             padding-bottom: 10px;
           }
-          
+
           /* Selector Box */
           .selector-box {
             padding: 10px 0;
@@ -527,7 +572,7 @@ app.get("/", (req, res) => {
             border-color: #4CAF50;
             box-shadow: 0 0 0 2px rgba(76, 175, 80, 0.2);
           }
-          
+
           /* Preview Controls - Mobile First */
           .preview-controls {
             display: flex;
@@ -543,7 +588,7 @@ app.get("/", (req, res) => {
             padding: 14px 20px;
             height: auto;
           }
-          
+
           /* Build Controls - Mobile First */
           .build-controls {
             display: flex;
@@ -554,7 +599,7 @@ app.get("/", (req, res) => {
           .build-controls .btn {
             width: 100%;
           }
-          
+
           /* Buttons */
           .btn {
             padding: 14px 20px;
@@ -625,7 +670,7 @@ app.get("/", (req, res) => {
             transform: none;
             box-shadow: none;
           }
-          
+
           /* Build Result */
           .build-result {
             padding: 15px;
@@ -672,11 +717,11 @@ app.get("/", (req, res) => {
             border-left: 4px solid #FFC107;
             animation: pulse 2s infinite;
           }
-          
+
           /* Status */
-          .status { 
-            color: #4CAF50; 
-            margin-bottom: 10px; 
+          .status {
+            color: #4CAF50;
+            margin-bottom: 10px;
             text-align: center;
             padding: 12px;
             background: #333;
@@ -699,49 +744,49 @@ app.get("/", (req, res) => {
             0%, 100% { opacity: 1; }
             50% { opacity: 0.6; }
           }
-          
+
           /* ========================================
              RESPONSIVE BREAKPOINTS
              ======================================== */
-          
+
           /* Tablet Portrait (600px+) */
           @media (min-width: 600px) {
             body {
               padding: 20px;
             }
-            
+
             .section-container {
               margin-bottom: 20px;
               padding: 20px;
             }
-            
+
             .section-container h2 {
               font-size: 18px;
             }
-            
+
             .selector-box label {
               font-size: 14px;
             }
-            
+
             .selector-box select {
               font-size: 15px;
               padding: 10px;
             }
-            
+
             .btn {
               font-size: 16px;
               padding: 12px 25px;
             }
-            
+
             .status {
               font-size: 15px;
             }
-            
+
             #build-info {
               font-size: 14px;
             }
           }
-          
+
           /* Tablet Landscape & Desktop (900px+) */
           @media (min-width: 900px) {
             /* Preview Controls - Side by Side */
@@ -756,7 +801,7 @@ app.get("/", (req, res) => {
               padding: 10px 30px;
               height: 44px;
             }
-            
+
             /* Build Controls - Side by Side */
             .build-controls {
               flex-direction: row;
@@ -766,7 +811,7 @@ app.get("/", (req, res) => {
               flex: 1;
             }
           }
-          
+
           /* Large Desktop (1200px+) */
           @media (min-width: 1200px) {
             body {
@@ -787,7 +832,7 @@ app.get("/", (req, res) => {
             </select>
           </div>
         </div>
-        
+
         <!-- 2. Preview Container -->
         <div class="section-container">
           <h2>▶️ Preview on Device</h2>
@@ -801,7 +846,7 @@ app.get("/", (req, res) => {
             <button class="btn btn-start" onclick="startPreview()">▶️ Start Preview</button>
           </div>
         </div>
-        
+
         <!-- 3. Update Repository Container -->
         <div class="section-container">
           <h2>🔄 Update Repository</h2>
@@ -812,7 +857,7 @@ app.get("/", (req, res) => {
             <div id="update-info"></div>
           </div>
         </div>
-        
+
         <!-- 4. Build Distribution Container -->
         <div class="section-container">
           <h2>📦 Build Distribution Package</h2>
@@ -820,46 +865,46 @@ app.get("/", (req, res) => {
             <button class="btn btn-build" id="btn-build" onclick="buildZab()">🔨 Build .zab Package</button>
             <button class="btn btn-abort" id="btn-abort-build" onclick="abortBuild()" style="display: none;">⏹️ Abort Build</button>
           </div>
-          
+
           <div class="build-result" id="build-result" style="display: none;">
             <div id="build-info"></div>
             <button class="btn btn-download" id="btn-download" onclick="downloadZab()" style="display: none;">⬇️ Download .zab</button>
           </div>
         </div>
-        
+
         <div class="status ready" id="status">
           ✅ Ready! Select a repository, then choose an action.
         </div>
-        
+
         <script>
           let currentZabPath = null;
           let currentBuildSessionId = null;
-          
+
           function startPreview() {
             const repo = document.getElementById('repo-select').value;
             const device = document.getElementById('device-select').value;
             window.location.href = '/preview?repo=' + encodeURIComponent(repo) + '&device=' + encodeURIComponent(device);
           }
-          
+
           function buildZab() {
             const repo = document.getElementById('repo-select').value;
-            
+
             const buildBtn = document.getElementById('btn-build');
             const abortBtn = document.getElementById('btn-abort-build');
             const buildResult = document.getElementById('build-result');
             const buildInfo = document.getElementById('build-info');
             const downloadBtn = document.getElementById('btn-download');
-            
+
             buildBtn.disabled = true;
             buildBtn.innerText = '⏳ Building...';
             abortBtn.disabled = false;
             abortBtn.style.display = 'inline-block';
-            
+
             buildResult.style.display = 'block';
             buildInfo.className = 'building';
             buildInfo.innerText = 'Building .zab file, please wait...';
             downloadBtn.style.display = 'none';
-            
+
             fetch('/build', {
               method: 'POST',
               headers: {
@@ -877,7 +922,7 @@ app.get("/", (req, res) => {
                 abortBtn.style.display = 'none';
                 return;
               }
-              
+
               // Save session ID and start polling
               currentBuildSessionId = data.sessionId;
               console.log('Build started, session:', currentBuildSessionId);
@@ -892,10 +937,10 @@ app.get("/", (req, res) => {
               abortBtn.style.display = 'none';
             });
           }
-          
+
           function pollBuildStatus() {
             if (!currentBuildSessionId) return;
-            
+
             fetch('/build-status/' + currentBuildSessionId)
               .then(response => response.json())
               .then(data => {
@@ -907,9 +952,9 @@ app.get("/", (req, res) => {
                   document.getElementById('btn-abort-build').style.display = 'none';
                   return;
                 }
-                
+
                 const buildInfo = document.getElementById('build-info');
-                
+
                 if (data.status === 'building') {
                   // Still building, poll again in 1 second
                   setTimeout(pollBuildStatus, 1000);
@@ -939,17 +984,17 @@ app.get("/", (req, res) => {
                 setTimeout(pollBuildStatus, 2000);
               });
           }
-          
+
           function abortBuild() {
             if (!currentBuildSessionId) {
               console.log('No active build to abort');
               return;
             }
-            
+
             const abortBtn = document.getElementById('btn-abort-build');
             abortBtn.disabled = true;
             abortBtn.innerText = '⏳ Aborting...';
-            
+
             fetch('/abort', {
               method: 'POST',
               headers: {
@@ -975,7 +1020,7 @@ app.get("/", (req, res) => {
               abortBtn.innerText = '⏹️ Abort Build';
             });
           }
-          
+
           function updateRepo() {
             const repo = document.getElementById('repo-select').value;
             if (!repo) {
@@ -983,16 +1028,16 @@ app.get("/", (req, res) => {
               document.getElementById('status').className = 'status warning';
               return;
             }
-            
+
             const updateResult = document.getElementById('update-result');
             const updateInfo = document.getElementById('update-info');
-            
+
             updateResult.style.display = 'block';
             updateInfo.innerHTML = '<div class="loading">🔄 Updating repository...</div>';
-            
+
             document.getElementById('status').innerText = '🔄 Updating repository from Git...';
             document.getElementById('status').className = 'status building';
-            
+
             fetch('/update-repo', {
               method: 'POST',
               headers: { 'Content-Type': 'application/json' },
@@ -1001,38 +1046,38 @@ app.get("/", (req, res) => {
             .then(function(res) { return res.json(); })
             .then(function(data) {
               if (data.success) {
-                var commitInfo = data.commit 
-                  ? '<br><small>Commit: ' + data.commit.substring(0, 7) + '</small>' 
+                var commitInfo = data.commit
+                  ? '<br><small>Commit: ' + data.commit.substring(0, 7) + '</small>'
                   : '';
-                
-                updateInfo.innerHTML = 
+
+                updateInfo.innerHTML =
                   '<div class="success-message">' +
                     '✅ ' + data.message + commitInfo +
                   '</div>';
-                
+
                 document.getElementById('status').innerText = '✅ Repository "' + repo + '" updated successfully';
                 document.getElementById('status').className = 'status ready';
               } else {
-                updateInfo.innerHTML = 
+                updateInfo.innerHTML =
                   '<div class="error-message">' +
                     '❌ Update failed: ' + data.error +
                   '</div>';
-                
+
                 document.getElementById('status').innerText = '❌ Update failed';
                 document.getElementById('status').className = 'status error';
               }
             })
             .catch(function(err) {
-              updateInfo.innerHTML = 
+              updateInfo.innerHTML =
                 '<div class="error-message">' +
                   '❌ Error: ' + err.message +
                 '</div>';
-              
+
               document.getElementById('status').innerText = '❌ Update error';
               document.getElementById('status').className = 'status error';
             });
           }
-          
+
           function downloadZab() {
             if (!currentZabPath) {
               alert('No file available for download');
@@ -1040,7 +1085,7 @@ app.get("/", (req, res) => {
             }
             window.location.href = currentZabPath;
           }
-          
+
           function formatBytes(bytes) {
             if (bytes === 0) return '0 Bytes';
             const k = 1024;
@@ -1061,11 +1106,23 @@ app.post("/", bodyParser.raw({ type: "*/*" }), async (req, res) => {
     return res.status(403).send("Invalid signature");
   }
 
-  const payload = JSON.parse(req.body.toString());
+  let payload;
+  try {
+    payload = JSON.parse(req.body.toString());
+  } catch (err) {
+    console.log("⛔ Invalid webhook payload:", err.message);
+    return res.status(400).send("Invalid payload");
+  }
+
+  // GitHub sends a "ping" event (no ref) when the webhook is created
+  if (req.headers["x-github-event"] === "ping") {
+    console.log("🏓 GitHub webhook ping received");
+    return res.send("pong");
+  }
+
   const branch = payload.ref?.replace("refs/heads/", "");
-  const repoFullName = payload.repository.full_name;
-  const repoName = payload.repository.name;
-  
+  const repoName = payload.repository?.name;
+
   console.log(`📮 Webhook received for repository: ${repoName}, branch: ${branch}`);
 
   // Check if repository is in configured list
@@ -1092,12 +1149,17 @@ app.post("/", bodyParser.raw({ type: "*/*" }), async (req, res) => {
 app.get("/preview", (req, res) => {
   const repoName = req.query.repo || REPOS[0];
   const deviceTarget = req.query.device || "Amazfit Balance";
-  
+
   // Generate unique session ID for this preview
   const sessionId = `${Date.now()}-${Math.random().toString(36).substr(2, 9)}`;
-  
+
   if (!repoName || !REPOS.includes(repoName)) {
     return res.status(400).send(`Invalid repository. Available: ${REPOS.join(', ')}`);
+  }
+
+  // The device ends up in the zeus command line: accept only known devices
+  if (!availableDevices.includes(deviceTarget)) {
+    return res.status(400).send('Invalid device');
   }
 
   const repoPath = getRepoPath(repoName);
@@ -1153,7 +1215,7 @@ app.get("/preview", (req, res) => {
             overflow-x: auto;
             max-width: 100%;
           }
-          
+
           .header {
             margin-bottom: 15px;
             padding: 15px;
@@ -1163,24 +1225,24 @@ app.get("/preview", (req, res) => {
             width: 100%;
             max-width: 900px;
           }
-          
+
           .header h2 {
             margin: 0 0 10px 0;
             color: #4CAF50;
             font-size: 18px;
           }
-          
+
           .header p {
             margin: 5px 0;
             color: #aaa;
             font-size: 13px;
             word-break: break-word;
           }
-          
+
           .header p strong {
             color: #fff;
           }
-          
+
           .btn {
             margin: 8px 5px;
             padding: 12px 20px;
@@ -1194,34 +1256,34 @@ app.get("/preview", (req, res) => {
             -webkit-tap-highlight-color: transparent;
             display: inline-block;
           }
-          
+
           .btn-abort {
             background: #f44336;
             color: white;
           }
-          
+
           .btn-abort:hover,
           .btn-abort:active {
             background: #da190b;
             transform: translateY(-2px);
             box-shadow: 0 4px 8px rgba(244, 67, 54, 0.3);
           }
-          
+
           .btn-back {
             background: #666;
             color: white;
           }
-          
+
           .btn-back:hover,
           .btn-back:active {
             background: #777;
           }
-          
-          .controls { 
-            margin-bottom: 15px; 
-            padding: 15px; 
-            background: #333; 
-            border-radius: 5px; 
+
+          .controls {
+            margin-bottom: 15px;
+            padding: 15px;
+            background: #333;
+            border-radius: 5px;
             text-align: center;
             width: 100%;
             max-width: 900px;
@@ -1231,12 +1293,12 @@ app.get("/preview", (req, res) => {
             color: #FF9800;
             font-size: 16px;
           }
-          .controls button { 
-            margin: 3px; 
-            padding: 8px 12px; 
-            background: #555; 
-            border: none; 
-            color: white; 
+          .controls button {
+            margin: 3px;
+            padding: 8px 12px;
+            background: #555;
+            border: none;
+            color: white;
             cursor: pointer;
             border-radius: 3px;
             font-size: 12px;
@@ -1261,72 +1323,72 @@ app.get("/preview", (req, res) => {
             font-family: monospace;
             font-size: 12px;
           }
-          
+
           /* ========================================
              RESPONSIVE BREAKPOINTS
              ======================================== */
-          
+
           /* Tablet Portrait (600px+) */
           @media (min-width: 600px) {
             body {
               padding: 20px;
             }
-            
+
             .header {
               margin-bottom: 20px;
               padding: 20px;
             }
-            
+
             .header h2 {
               font-size: 20px;
             }
-            
+
             .header p {
               font-size: 14px;
             }
-            
+
             .btn {
               margin: 10px 5px;
               padding: 12px 25px;
               font-size: 15px;
             }
-            
+
             .controls {
               margin-bottom: 20px;
               padding: 20px;
             }
-            
+
             .controls h3 {
               font-size: 18px;
             }
-            
+
             .controls button {
               margin: 5px;
               padding: 8px 15px;
               font-size: 13px;
             }
-            
+
             .control-row span {
               font-size: 13px;
             }
           }
-          
+
           /* Tablet Landscape & Desktop (900px+) */
           @media (min-width: 900px) {
             .btn {
               font-size: 16px;
             }
-            
+
             .controls button {
               padding: 5px 10px;
               font-size: 14px;
             }
-            
+
             .control-row span {
               font-size: 14px;
             }
           }
-          
+
           /* Large Desktop (1200px+) */
           @media (min-width: 1200px) {
             body {
@@ -1339,14 +1401,14 @@ app.get("/preview", (req, res) => {
       <body>
         <script>
           const SESSION_ID = '${sessionId}';
-          
+
           function abortPreview() {
             const abortBtn = document.getElementById('btn-abort');
             if (abortBtn) {
               abortBtn.disabled = true;
               abortBtn.innerText = '⏳ Aborting...';
             }
-            
+
             fetch('/abort', {
               method: 'POST',
               headers: {
@@ -1366,11 +1428,11 @@ app.get("/preview", (req, res) => {
               window.location.href = '/';
             });
           }
-          
+
           function backToSetup() {
             window.location.href = '/?repo=${encodeURIComponent(repoName)}&device=${encodeURIComponent(deviceTarget)}';
           }
-          
+
           function setCookie(name, value) {
             const d = new Date();
             d.setTime(d.getTime() + (30*24*60*60*1000));
@@ -1432,10 +1494,10 @@ app.get("/preview", (req, res) => {
             }
             updateCSS();
           }
-          
+
           window.onload = updateCSS;
         </script>
-        
+
         <div class="header">
           <h2>⏳ Zeus Preview Running</h2>
           <p>📦 Repository: <strong>${repoName}</strong></p>
@@ -1443,7 +1505,7 @@ app.get("/preview", (req, res) => {
           <button class="btn btn-abort" id="btn-abort" onclick="abortPreview()">⏹️ Abort Preview</button>
           <button class="btn btn-back" onclick="backToSetup()">⬅️ Back to Setup</button>
         </div>
-        
+
         <div class="controls">
           <h3>🎛️ QR Code Display Fine Tuning</h3>
           <div class="control-row">
@@ -1462,17 +1524,17 @@ app.get("/preview", (req, res) => {
             <button onclick="changeParam('letterSpacing', 0.01)">Letter Spacing +</button>
           </div>
         </div>
-        
+
         <pre id="log-output">
   `);
 
   // Start zeus immediately
-  const zeus = spawn("zeus", ["preview", "--target", `"${deviceTarget}"`], {
+  // No shell: arguments are passed as-is, so they cannot inject commands
+  const zeus = spawn("zeus", ["preview", "--target", deviceTarget], {
     cwd: repoPath,
-    shell: true,
     env: { ...process.env, FORCE_COLOR: "0" }
   });
-  
+
   // Store process in active processes map for this session
   activeProcesses.set(sessionId, zeus);
   console.log(`📝 Registered Zeus process for session: ${sessionId}`);
@@ -1500,11 +1562,11 @@ app.get("/preview", (req, res) => {
 
   zeus.on("close", (code) => {
     clearTimeout(killer);
-    
+
     // Remove from active processes
     activeProcesses.delete(sessionId);
     console.log(`🧹 Zeus process closed for session: ${sessionId}, exit code: ${code}`);
-    
+
     res.write(`
   <script>
     // Re-enable buttons after process completes
@@ -1517,7 +1579,7 @@ app.get("/preview", (req, res) => {
   </pre></body></html>`);
     res.end();
   });
-  
+
   // Clean up if client disconnects before build completes
   req.on('close', () => {
     if (!zeus.killed && activeProcesses.has(sessionId)) {
@@ -1570,7 +1632,7 @@ app.post("/update-repo", bodyParser.json(), async (req, res) => {
 
   try {
     const result = await updateRepository(repo);
-    
+
     if (result.success) {
       res.status(200).json({
         success: true,

@@ -15,6 +15,13 @@ services:
       TELEGRAM_BOT_TOKEN: "${TELEGRAM_BOT_TOKEN}"
       # Telegram User Whitelist (optional - comma-separated user IDs)
       TELEGRAM_ALLOWED_USERS: "${TELEGRAM_ALLOWED_USERS:-}"
+      # Basic Auth for the web interface (optional - both required to enable)
+      WEB_AUTH_USER: "${WEB_AUTH_USER:-}"
+      WEB_AUTH_PASS: "${WEB_AUTH_PASS:-}"
+      # Defaults for the /quick bot command (optional)
+      DEFAULT_REPO: "${DEFAULT_REPO:-}"
+      DEFAULT_DEVICE: "${DEFAULT_DEVICE:-}"
+      DEFAULT_BRANCH: "${DEFAULT_BRANCH:-main}"
     volumes:
       # Mount the entire workspace directory
       - ./workspace:/workspace

@@ -10,6 +10,11 @@ const BOT_TOKEN = process.env.TELEGRAM_BOT_TOKEN;
 const REPOS = (process.env.GITHUB_REPOS || '').split(',').filter(Boolean);
 const WORKSPACE_DIR = process.env.WORKSPACE_DIR || '/workspace';
 
+// Fallback defaults for /quick (used until a repo/device has been chosen once)
+const DEFAULT_REPO = process.env.DEFAULT_REPO || '';
+const DEFAULT_DEVICE = process.env.DEFAULT_DEVICE || '';
+const DEFAULT_BRANCH = process.env.DEFAULT_BRANCH || 'main';
+
 if (!BOT_TOKEN) {
   console.error('❌ TELEGRAM_BOT_TOKEN not set in .env file!');
   process.exit(1);
@@ -19,11 +24,58 @@ if (!BOT_TOKEN) {
 const bot = new Telegraf(BOT_TOKEN);
 
 // ============================================================================
+// RESILIENCE HELPERS
+// ============================================================================
+
+// Keep the process alive on unhandled errors (e.g. transient network failures
+// raised inside child-process callbacks, which Telegraf's bot.catch cannot see)
+process.on('unhandledRejection', (reason) => {
+  console.error('⚠️ Unhandled rejection:', reason && reason.message ? reason.message : reason);
+});
+process.on('uncaughtException', (err) => {
+  console.error('⚠️ Uncaught exception:', err.message);
+});
+
+const TRANSIENT_CODES = ['ECONNRESET', 'ETIMEDOUT', 'EAI_AGAIN', 'ECONNREFUSED', 'EPIPE'];
+
+// Retry a Telegram API call a few times when the failure is a transient network error
+async function withRetry(fn, attempts = 3, delayMs = 1500) {
+  for (let i = 1; i <= attempts; i++) {
+    try {
+      return await fn();
+    } catch (err) {
+      const transient = TRANSIENT_CODES.includes(err.code) || TRANSIENT_CODES.includes(err.errno);
+      if (!transient || i === attempts) throw err;
+      console.warn(`⚠️ Telegram call failed (${err.code}), retry ${i}/${attempts - 1}...`);
+      await new Promise((resolve) => setTimeout(resolve, delayMs * i));
+    }
+  }
+}
+
+// Edit a message with retry; never throws, so it is safe inside process callbacks
+async function safeEdit(ctx, ...args) {
+  try {
+    return await withRetry(() => ctx.telegram.editMessageText(...args));
+  } catch (err) {
+    console.error('❌ editMessageText failed after retries:', err.message);
+  }
+}
+
+// Send a reply (text, photo, document...) with retry; never throws
+async function safeSend(ctx, method, ...args) {
+  try {
+    return await withRetry(() => ctx[method](...args));
+  } catch (err) {
+    console.error(`❌ ${method} failed after retries:`, err.message);
+  }
+}
+
+// ============================================================================
 // AUTHORIZATION MIDDLEWARE
 // ============================================================================
 
 // Whitelist of allowed Telegram user IDs (comma-separated in env)
-const ALLOWED_USERS = process.env.TELEGRAM_ALLOWED_USERS 
+const ALLOWED_USERS = process.env.TELEGRAM_ALLOWED_USERS
   ? process.env.TELEGRAM_ALLOWED_USERS.split(',').map(id => parseInt(id.trim()))
   : [];
 
@@ -41,16 +93,16 @@ if (WHITELIST_ENABLED) {
 bot.use(async (ctx, next) => {
   const userId = ctx.from?.id;
   const username = ctx.from?.username || ctx.from?.first_name || 'Unknown';
-  
+
   // Skip authorization if whitelist is disabled
   if (!WHITELIST_ENABLED) {
     return next();
   }
-  
+
   // Check if user is authorized
   if (!ALLOWED_USERS.includes(userId)) {
     console.warn(`⛔ Unauthorized access attempt from user ${userId} (@${username})`);
-    
+
     await ctx.reply(
       '⛔ *Access Denied*\n\n' +
       'This bot is private and requires authorization.\n\n' +
@@ -58,11 +110,11 @@ bot.use(async (ctx, next) => {
       'Contact the bot owner to request access.',
       { parse_mode: 'Markdown' }
     );
-    
+
     // Don't call next() - stop processing
     return;
   }
-  
+
   // User is authorized, continue to next middleware
   return next();
 });
@@ -87,7 +139,7 @@ try {
       .map(d => d.productName)
       .filter((name, index, self) => self.indexOf(name) === index) // Remove duplicates
       .sort(); // Sort alphabetically
-    
+
     console.log(`✅ Loaded ${DEVICES.length} devices from Zeus config`);
   } else {
     throw new Error('.zeus_devices file not found');
@@ -109,7 +161,7 @@ function renderQRCodeToImage(asciiQR, projectInfo = null, expiryDate = null) {
   const charWidth = 8;    // pixels per character width
   const charHeight = 16;  // pixels per character height
   const padding = 20;     // padding around QR code
-  
+
   // Calculate extra height needed for info below QR
   let extraHeight = 0;
   if (projectInfo) extraHeight += 90;  // Space for project info
@@ -150,22 +202,22 @@ function renderQRCodeToImage(asciiQR, projectInfo = null, expiryDate = null) {
     ctx.moveTo(padding, currentY);
     ctx.lineTo(width - padding, currentY);
     ctx.stroke();
-    
+
     currentY += 15;
-    
+
     // Draw project name and version
     ctx.font = 'bold 14px "DejaVu Sans Mono", "Courier New", monospace';
     ctx.textAlign = 'center';
     ctx.fillStyle = '#4CAF50'; // Green color for project
     ctx.fillText(projectInfo.name, width / 2, currentY);
-    
+
     currentY += 20;
-    
+
     // Draw device
     ctx.font = '13px "DejaVu Sans Mono", "Courier New", monospace';
     ctx.fillStyle = '#90CAF9'; // Light blue for device
     ctx.fillText(projectInfo.device, width / 2, currentY);
-    
+
     currentY += 25;
   }
 
@@ -181,15 +233,15 @@ function renderQRCodeToImage(asciiQR, projectInfo = null, expiryDate = null) {
       ctx.stroke();
       currentY += 15;
     }
-    
+
     // Draw expiry label (without emoji)
     ctx.font = 'bold 14px "DejaVu Sans Mono", "Courier New", monospace';
     ctx.textAlign = 'center';
     ctx.fillStyle = '#FFD700'; // Gold color for emphasis
     ctx.fillText('Expires:', width / 2, currentY);
-    
+
     currentY += 20;
-    
+
     // Draw expiry date
     ctx.font = '13px "DejaVu Sans Mono", "Courier New", monospace';
     ctx.fillStyle = 'white';
@@ -232,11 +284,11 @@ function extractQRCode(output) {
 function extractExpiryDate(output) {
   // Look for line: [✔] This QR code will expire on 2026-01-31 02:46:22.
   const expiryMatch = output.match(/This QR code will expire on (.+?)\./);
-  
+
   if (expiryMatch && expiryMatch[1]) {
     return expiryMatch[1].trim();
   }
-  
+
   return null;
 }
 
@@ -246,14 +298,14 @@ function extractProjectInfo(output) {
   // Format: [Amazfit Balance] zhue-1.0.1
   // This line comes right after the "This QR code will expire" line
   const projectMatch = output.match(/This QR code will expire on.*?\n\[([^\]]+)\]\s+(\S+)/s);
-  
+
   if (projectMatch && projectMatch[1] && projectMatch[2]) {
     return {
       device: projectMatch[1].trim(),
       name: projectMatch[2].trim()
     };
   }
-  
+
   return null;
 }
 
@@ -273,10 +325,11 @@ function escapeMarkdown(text) {
 bot.command('start', (ctx) => {
   const userId = ctx.from.id;
   const username = ctx.from.username || ctx.from.first_name || 'Unknown';
-  
+
   ctx.reply(
     '🚀 *ZeppOS Development Bot*\n\n' +
     'Available commands:\n' +
+    '/quick repo+device - Update + preview (remembers last choice)\n' +
     '/preview - Start preview on device\n' +
     '/build - Build .zab package\n' +
     '/update - Update repository\n' +
@@ -293,7 +346,7 @@ bot.command('start', (ctx) => {
 bot.command('myid', (ctx) => {
   const userId = ctx.from.id;
   const username = ctx.from.username || ctx.from.first_name || 'Unknown';
-  
+
   ctx.reply(
     '👤 *Your Telegram Information*\n\n' +
     `User ID: \`${userId}\`\n` +
@@ -337,13 +390,14 @@ bot.command('update', async (ctx) => {
 // Handle update repository selection
 bot.action(/update:repo:(.+)/, async (ctx) => {
   const repo = ctx.match[1];
+  if (!REPOS.includes(repo)) return ctx.answerCbQuery('❌ Unknown repository');
   const chatId = ctx.chat.id;
   const username = ctx.from.username || ctx.from.first_name || 'Unknown';
 
   await ctx.answerCbQuery();
 
   const repoPath = getRepoPath(repo);
-  
+
   console.log(`[TELEGRAM UPDATE] User: ${username}, Repo: ${repo}, Path: ${repoPath}`);
 
   // Send updating message
@@ -351,7 +405,7 @@ bot.action(/update:repo:(.+)/, async (ctx) => {
 
   try {
     console.log(`[TELEGRAM UPDATE] Starting git fetch for ${repo}...`);
-    
+
     // Step 1: Fetch from origin
     const gitFetch = spawn('git', ['fetch', 'origin'], {
       cwd: repoPath,
@@ -375,10 +429,10 @@ bot.action(/update:repo:(.+)/, async (ctx) => {
 
     gitFetch.on('close', async (fetchCode) => {
       console.log(`[TELEGRAM UPDATE] [${repo}] fetch closed with code: ${fetchCode}`);
-      
+
       if (fetchCode !== 0) {
         console.error(`[TELEGRAM UPDATE] [${repo}] fetch failed:`, fetchError);
-        await ctx.telegram.editMessageText(
+        await safeEdit(ctx,
           chatId,
           statusMsg.message_id,
           undefined,
@@ -412,10 +466,10 @@ bot.action(/update:repo:(.+)/, async (ctx) => {
 
       gitReset.on('close', async (resetCode) => {
         console.log(`[TELEGRAM UPDATE] [${repo}] reset closed with code: ${resetCode}`);
-        
+
         if (resetCode !== 0) {
           console.error(`[TELEGRAM UPDATE] [${repo}] reset failed:`, resetError);
-          await ctx.telegram.editMessageText(
+          await safeEdit(ctx,
             chatId,
             statusMsg.message_id,
             undefined,
@@ -428,13 +482,13 @@ bot.action(/update:repo:(.+)/, async (ctx) => {
 
         // Check if anything changed
         const wasUpdated = resetOutput.includes('HEAD is now at');
-        const alreadyUpToDate = fetchOutput.includes('Already up to date') || 
+        const alreadyUpToDate = fetchOutput.includes('Already up to date') ||
                                 fetchOutput.trim() === '';
 
         if (alreadyUpToDate && resetOutput.includes('HEAD is now at')) {
           // Already up to date
           console.log(`[TELEGRAM UPDATE] [${repo}] Already up to date`);
-          await ctx.telegram.editMessageText(
+          await safeEdit(ctx,
             chatId,
             statusMsg.message_id,
             undefined,
@@ -443,7 +497,7 @@ bot.action(/update:repo:(.+)/, async (ctx) => {
         } else if (wasUpdated) {
           // Updated successfully
           console.log(`[TELEGRAM UPDATE] [${repo}] Updated successfully`);
-          await ctx.telegram.editMessageText(
+          await safeEdit(ctx,
             chatId,
             statusMsg.message_id,
             undefined,
@@ -452,7 +506,7 @@ bot.action(/update:repo:(.+)/, async (ctx) => {
         } else {
           // Generic success
           console.log(`[TELEGRAM UPDATE] [${repo}] Update completed`);
-          await ctx.telegram.editMessageText(
+          await safeEdit(ctx,
             chatId,
             statusMsg.message_id,
             undefined,
@@ -464,7 +518,7 @@ bot.action(/update:repo:(.+)/, async (ctx) => {
 
   } catch (err) {
     console.error(`[TELEGRAM UPDATE] [${repo}] Exception:`, err);
-    await ctx.telegram.editMessageText(
+    await safeEdit(ctx,
       chatId,
       statusMsg.message_id,
       undefined,
@@ -502,6 +556,7 @@ bot.command('build', async (ctx) => {
 // Handle build repository selection
 bot.action(/build:repo:(.+)/, async (ctx) => {
   const repo = ctx.match[1];
+  if (!REPOS.includes(repo)) return ctx.answerCbQuery('❌ Unknown repository');
   const chatId = ctx.chat.id;
 
   await ctx.answerCbQuery();
@@ -555,7 +610,7 @@ bot.action(/build:repo:(.+)/, async (ctx) => {
       activeSessions.delete(chatId);
 
       if (code !== 0) {
-        await ctx.telegram.editMessageText(
+        await safeEdit(ctx,
           chatId,
           statusMsg.message_id,
           undefined,
@@ -566,13 +621,13 @@ bot.action(/build:repo:(.+)/, async (ctx) => {
 
       // Find .zab file in dist folder
       const distPath = path.join(repoPath, 'dist');
-      
+
       try {
         const files = fs.readdirSync(distPath);
         const zabFile = files.find(f => f.endsWith('.zab'));
 
         if (!zabFile) {
-          await ctx.telegram.editMessageText(
+          await safeEdit(ctx,
             chatId,
             statusMsg.message_id,
             undefined,
@@ -586,17 +641,19 @@ bot.action(/build:repo:(.+)/, async (ctx) => {
         const sizeKB = (stats.size / 1024).toFixed(2);
 
         // Send .zab file
-        await ctx.replyWithDocument(
+        await safeSend(
+          ctx,
+          'replyWithDocument',
           { source: zabPath, filename: zabFile },
           {
             caption: `✅ Build successful!\n\n📦 ${repo}\n📄 ${zabFile}\n💾 Size: ${sizeKB} KB`
           }
         );
 
-        await ctx.telegram.deleteMessage(chatId, statusMsg.message_id);
+        await ctx.telegram.deleteMessage(chatId, statusMsg.message_id).catch(() => {});
 
       } catch (err) {
-        await ctx.telegram.editMessageText(
+        await safeEdit(ctx,
           chatId,
           statusMsg.message_id,
           undefined,
@@ -606,7 +663,7 @@ bot.action(/build:repo:(.+)/, async (ctx) => {
     });
 
   } catch (err) {
-    await ctx.telegram.editMessageText(
+    await safeEdit(ctx,
       chatId,
       statusMsg.message_id,
       undefined,
@@ -644,6 +701,7 @@ bot.command('preview', async (ctx) => {
 // Handle repository selection
 bot.action(/preview:repo:(.+)/, async (ctx) => {
   const repo = ctx.match[1];
+  if (!REPOS.includes(repo)) return ctx.answerCbQuery('❌ Unknown repository');
   const chatId = ctx.chat.id;
 
   // Store repo in session
@@ -668,6 +726,7 @@ bot.action(/preview:repo:(.+)/, async (ctx) => {
 // Handle device selection and start preview
 bot.action(/preview:device:(.+)/, async (ctx) => {
   const device = ctx.match[1];
+  if (!DEVICES.includes(device)) return ctx.answerCbQuery('❌ Unknown device');
   const chatId = ctx.chat.id;
   const session = activeSessions.get(chatId);
 
@@ -679,6 +738,9 @@ bot.action(/preview:device:(.+)/, async (ctx) => {
   const repo = session.repo;
   const repoPath = getRepoPath(repo);
 
+  // Remember the choice so a plain /quick reuses it
+  saveQuickState(chatId, { repo, device });
+
   await ctx.answerCbQuery();
   await ctx.editMessageText(`Repository: ${repo}\nDevice: ${device}\n\n⏳ Starting preview...`);
 
@@ -686,9 +748,8 @@ bot.action(/preview:device:(.+)/, async (ctx) => {
 
   try {
     // Spawn Zeus preview
-    const zeus = spawn('zeus', ['preview', '--target', `"${device}"`], {
+    const zeus = spawn('zeus', ['preview', '--target', device], {
       cwd: repoPath,
-      shell: true,
       env: { ...process.env, FORCE_COLOR: '0' }
     });
 
@@ -725,7 +786,7 @@ bot.action(/preview:device:(.+)/, async (ctx) => {
       activeSessions.delete(chatId);
 
       if (code !== 0) {
-        await ctx.telegram.editMessageText(
+        await safeEdit(ctx,
           chatId,
           statusMsg.message_id,
           undefined,
@@ -740,7 +801,7 @@ bot.action(/preview:device:(.+)/, async (ctx) => {
       const expiryDate = extractExpiryDate(output);
 
       if (!qrCode) {
-        await ctx.telegram.editMessageText(
+        await safeEdit(ctx,
           chatId,
           statusMsg.message_id,
           undefined,
@@ -759,22 +820,306 @@ bot.action(/preview:device:(.+)/, async (ctx) => {
       }
 
       // Send QR code image
-      await ctx.replyWithPhoto(
+      await safeSend(
+        ctx,
+        'replyWithPhoto',
         { source: qrImage },
         { caption }
       );
 
-      await ctx.telegram.deleteMessage(chatId, statusMsg.message_id);
+      await ctx.telegram.deleteMessage(chatId, statusMsg.message_id).catch(() => {});
     });
 
   } catch (err) {
-    await ctx.telegram.editMessageText(
+    await safeEdit(ctx,
       chatId,
       statusMsg.message_id,
       undefined,
       `❌ Error: ${err.message}`
     );
   }
+});
+
+// ============================================================================
+// QUICK PREVIEW (git update + preview, QR in one step)
+// ============================================================================
+
+// Last repo/device used per chat; persisted to disk so it survives restarts
+const QUICK_STATE_FILE = process.env.QUICK_STATE_FILE || path.join(WORKSPACE_DIR, '.zepp-bot-quick.json');
+let quickState = {};
+try {
+  if (fs.existsSync(QUICK_STATE_FILE)) {
+    quickState = JSON.parse(fs.readFileSync(QUICK_STATE_FILE, 'utf8'));
+  }
+} catch (err) {
+  console.warn('⚠️ Could not read quick state file:', err.message);
+}
+
+function getQuickState(chatId) {
+  return quickState[chatId] || {};
+}
+
+function saveQuickState(chatId, patch) {
+  quickState[chatId] = { ...getQuickState(chatId), ...patch };
+  try {
+    fs.writeFileSync(QUICK_STATE_FILE, JSON.stringify(quickState, null, 2));
+  } catch (err) {
+    console.warn('⚠️ Could not write quick state file:', err.message);
+  }
+}
+
+// Selections waiting for a keyboard choice, per chat
+const pendingQuick = new Map();
+
+// Run a command and resolve with { code, output }; never rejects
+function runCommand(cmd, args, { cwd, shell = false, onSpawn } = {}) {
+  return new Promise((resolve) => {
+    let output = '';
+    let proc;
+    try {
+      proc = spawn(cmd, args, { cwd, shell, env: { ...process.env, FORCE_COLOR: '0' } });
+    } catch (err) {
+      return resolve({ code: -1, output: err.message });
+    }
+    if (onSpawn) onSpawn(proc);
+    proc.stdout.on('data', (d) => { output += d.toString(); });
+    proc.stderr.on('data', (d) => { output += d.toString(); });
+    proc.on('error', (err) => resolve({ code: -1, output: output + err.message }));
+    proc.on('close', (code) => resolve({ code, output }));
+  });
+}
+
+function normalize(text) {
+  return String(text).toLowerCase().replace(/[^a-z0-9]/g, '');
+}
+
+// Fuzzy search on a list of names (repos or devices).
+// Every letter/digit group of the query must appear in the name, in order,
+// so "bal3", "Balance3" and "balance 3" all match "Amazfit Balance 3".
+// Returns { match } when there is a single winner, otherwise { candidates } (possibly empty).
+function fuzzyFind(query, list) {
+  const q = normalize(query);
+  const groups = String(query).toLowerCase().match(/[a-z]+|[0-9]+/g) || [];
+  if (!q) return { candidates: [] };
+
+  // Exact match, also ignoring the "Amazfit" brand prefix
+  const exact = list.filter((item) => {
+    const n = normalize(item);
+    return n === q || n.replace(/^amazfit/, '') === q;
+  });
+  if (exact.length === 1) return { match: exact[0] };
+
+  const candidates = list.filter((item) => {
+    const n = normalize(item);
+    let pos = 0;
+    for (const g of groups) {
+      const idx = n.indexOf(g, pos);
+      if (idx === -1) return false;
+      pos = idx + g.length;
+    }
+    return true;
+  });
+  if (candidates.length <= 1) {
+    return candidates.length === 1 ? { match: candidates[0] } : { candidates };
+  }
+
+  // Several hits: prefer contiguous matches, then the shortest name if it is unique
+  // (so "balance" picks "Amazfit Balance" over "Amazfit Balance 2")
+  const contiguous = candidates.filter((item) => normalize(item).includes(q));
+  const pool = contiguous.length ? contiguous : candidates;
+  if (pool.length === 1) return { match: pool[0] };
+  const minLen = Math.min(...pool.map((item) => normalize(item).length));
+  const shortest = pool.filter((item) => normalize(item).length === minLen);
+  if (shortest.length === 1) return { match: shortest[0] };
+  return { candidates: pool };
+}
+
+async function quickPreview(ctx, repo, device) {
+  const chatId = ctx.chat.id;
+  const repoPath = getRepoPath(repo);
+  const startedAt = Date.now();
+
+  const session = { repo, device, quick: true };
+  activeSessions.set(chatId, session);
+
+  const statusMsg = await safeSend(ctx, 'reply', `🔄 ${repo}: updating...`);
+  const setStatus = (text) => statusMsg
+    ? safeEdit(ctx, chatId, statusMsg.message_id, undefined, text)
+    : Promise.resolve();
+
+  // Hard timeout for the whole flow
+  session.timeoutId = setTimeout(() => {
+    if (session.process) session.process.kill();
+    session.timedOut = true;
+  }, 300000);
+
+  const onSpawn = (proc) => { session.process = proc; };
+
+  try {
+    // Step 1: update the repository (fetch + hard reset)
+    const fetchRes = await runCommand('git', ['fetch', 'origin'], { cwd: repoPath, onSpawn });
+    if (session.aborted) return;
+    if (fetchRes.code !== 0) {
+      return setStatus(`❌ Update failed (fetch)\n\n${fetchRes.output.slice(-300)}`);
+    }
+
+    const resetRes = await runCommand('git', ['reset', '--hard', `origin/${DEFAULT_BRANCH}`], { cwd: repoPath, onSpawn });
+    if (session.aborted) return;
+    if (resetRes.code !== 0) {
+      return setStatus(`❌ Update failed (reset)\n\n${resetRes.output.slice(-300)}`);
+    }
+    console.log(`[QUICK] [${repo}] ${resetRes.output.trim()}`);
+
+    // Step 2: zeus preview on the selected device
+    await setStatus(`🔨 ${repo}: running preview on ${device}...`);
+    const prev = await runCommand('zeus', ['preview', '--target', device], {
+      cwd: repoPath,
+      onSpawn
+    });
+    if (session.aborted) return;
+    if (session.timedOut) {
+      return setStatus('⏰ Preview timeout after 5 minutes');
+    }
+    if (prev.code !== 0) {
+      return setStatus(`❌ Preview failed with exit code ${prev.code}\n\n${prev.output.slice(-300)}`);
+    }
+
+    // Step 3: extract the QR code and send it as an image
+    const qrCode = extractQRCode(prev.output);
+    if (!qrCode) {
+      return setStatus('❌ Could not find QR code in Zeus output');
+    }
+    const projectInfo = extractProjectInfo(prev.output);
+    const expiryDate = extractExpiryDate(prev.output);
+    const qrImage = renderQRCodeToImage(qrCode, projectInfo, expiryDate);
+
+    const seconds = Math.round((Date.now() - startedAt) / 1000);
+    let caption = `✅ Quick preview (${seconds}s)\n\n📦 ${repo}\n⌚ ${device}\n🔄 ${resetRes.output.trim() || 'repo synchronized'}`;
+    if (expiryDate) caption += `\n\nExpires: ${expiryDate}`;
+
+    await safeSend(ctx, 'replyWithPhoto', { source: qrImage }, { caption });
+    if (statusMsg) {
+      await ctx.telegram.deleteMessage(chatId, statusMsg.message_id).catch(() => {});
+    }
+  } catch (err) {
+    console.error('[QUICK] Error:', err);
+    await setStatus(`❌ Error: ${err.message}`);
+  } finally {
+    clearTimeout(session.timeoutId);
+    if (activeSessions.get(chatId) === session) activeSessions.delete(chatId);
+  }
+}
+
+// Ask with a keyboard for whatever is still missing, otherwise run the preview.
+// Callback data carries list indexes to stay under Telegram's 64-byte limit.
+async function continueQuick(ctx, sel) {
+  const chatId = ctx.chat.id;
+
+  if (!sel.repo) {
+    pendingQuick.set(chatId, sel);
+    const list = sel.repoCandidates && sel.repoCandidates.length ? sel.repoCandidates : REPOS;
+    const keyboard = list.map((r) => ([{ text: `📦 ${r}`, callback_data: `quick:repo:${REPOS.indexOf(r)}` }]));
+    return ctx.reply(`${sel.note || ''}Select repository for quick preview:`, {
+      reply_markup: { inline_keyboard: keyboard }
+    });
+  }
+
+  if (!sel.device) {
+    pendingQuick.set(chatId, sel);
+    const list = sel.deviceCandidates && sel.deviceCandidates.length ? sel.deviceCandidates : DEVICES;
+    const keyboard = list.map((d) => ([{ text: `⌚ ${d}`, callback_data: `quick:dev:${DEVICES.indexOf(d)}` }]));
+    return ctx.reply(`${sel.note || ''}📦 ${sel.repo}\n\nSelect device:`, {
+      reply_markup: { inline_keyboard: keyboard }
+    });
+  }
+
+  pendingQuick.delete(chatId);
+  if (activeSessions.has(chatId)) {
+    return ctx.reply('⚠️ You already have an active session. Use /abort first.');
+  }
+  saveQuickState(chatId, { repo: sel.repo, device: sel.device });
+  return quickPreview(ctx, sel.repo, sel.device);
+}
+
+// Usage:
+//   /quick                 -> last repo + last device
+//   /quick zhue            -> repo "zhue", last device
+//   /quick zhue+bal3       -> repo "zhue", device matching "bal3"
+//   /quick +gtr4           -> last repo, device matching "gtr4"
+bot.command(['quick', 'q'], async (ctx) => {
+  const chatId = ctx.chat.id;
+
+  if (activeSessions.has(chatId)) {
+    return ctx.reply('⚠️ You already have an active session. Use /abort first.');
+  }
+  if (REPOS.length === 0) {
+    return ctx.reply('❌ No repositories configured');
+  }
+
+  const arg = ctx.message.text.replace(/^\/\S+\s*/, '').trim();
+  const plusIndex = arg.indexOf('+');
+  const repoQuery = (plusIndex === -1 ? arg : arg.slice(0, plusIndex)).trim();
+  const deviceQuery = (plusIndex === -1 ? '' : arg.slice(plusIndex + 1)).trim();
+
+  const state = getQuickState(chatId);
+  const sel = { note: '' };
+
+  // Repository: query > last used > DEFAULT_REPO > the only repo
+  if (repoQuery) {
+    const res = fuzzyFind(repoQuery, REPOS);
+    if (res.match) {
+      sel.repo = res.match;
+    } else {
+      sel.repoCandidates = res.candidates;
+      sel.note += res.candidates.length
+        ? `🔎 "${repoQuery}" matches several repositories.\n`
+        : `❌ No repository matches "${repoQuery}".\n`;
+    }
+  } else {
+    sel.repo = (REPOS.includes(state.repo) && state.repo)
+      || (REPOS.includes(DEFAULT_REPO) && DEFAULT_REPO)
+      || (REPOS.length === 1 && REPOS[0])
+      || null;
+  }
+
+  // Device: query > last used > DEFAULT_DEVICE
+  if (deviceQuery) {
+    const res = fuzzyFind(deviceQuery, DEVICES);
+    if (res.match) {
+      sel.device = res.match;
+    } else {
+      sel.deviceCandidates = res.candidates;
+      sel.note += res.candidates.length
+        ? `🔎 "${deviceQuery}" matches several devices.\n`
+        : `❌ No device matches "${deviceQuery}".\n`;
+    }
+  } else {
+    sel.device = state.device || DEFAULT_DEVICE || null;
+  }
+
+  if (sel.note) sel.note += '\n';
+  return continueQuick(ctx, sel);
+});
+
+bot.action(/quick:(repo|dev):(\d+)/, async (ctx) => {
+  const chatId = ctx.chat.id;
+  const [, kind, index] = ctx.match;
+  const sel = pendingQuick.get(chatId);
+
+  await ctx.answerCbQuery();
+  if (!sel) {
+    return ctx.reply('⚠️ Selection expired, send /quick again');
+  }
+
+  if (kind === 'repo') sel.repo = REPOS[Number(index)];
+  else sel.device = DEVICES[Number(index)];
+  if ((kind === 'repo' && !sel.repo) || (kind === 'dev' && !sel.device)) {
+    return ctx.reply('⚠️ Invalid selection, send /quick again');
+  }
+  sel.note = '';
+
+  await ctx.deleteMessage().catch(() => {});
+  return continueQuick(ctx, sel);
 });
 
 // Abort command
@@ -791,12 +1136,15 @@ bot.command('abort', (ctx) => {
     if (session.timeoutId) {
       clearTimeout(session.timeoutId);
     }
-    
+
+    // Tell any running async flow (e.g. /quick) to stop
+    session.aborted = true;
+
     // Kill process if it exists
     if (session.process) {
       session.process.kill('SIGTERM');
     }
-    
+
     // Always delete the session (even if no process)
     activeSessions.delete(chatId);
     ctx.reply('✅ Session aborted');
@@ -813,7 +1161,11 @@ bot.command('status', (ctx) => {
   const session = activeSessions.get(chatId);
 
   if (!session) {
-    return ctx.reply('🟢 No active session');
+    const q = getQuickState(chatId);
+    const quickInfo = q.repo || q.device
+      ? `\n\n⚡ /quick will use: ${q.repo || '?'} + ${q.device || '?'}`
+      : '';
+    return ctx.reply(`🟢 No active session${quickInfo}`);
   }
 
   const sessionType = session.device ? '▶️ Preview' : '🔨 Build';
@@ -829,8 +1181,8 @@ bot.command('status', (ctx) => {
 
 // Error handling
 bot.catch((err, ctx) => {
-  console.error('Bot error:', err);
-  ctx.reply('❌ An error occurred. Please try again.');
+  console.error('Bot error:', err.message);
+  safeSend(ctx, 'reply', '❌ An error occurred. Please try again.');
 });
 
 // Start bot
@@ -841,6 +1193,10 @@ bot.launch().then(() => {
   console.log(`Repositories: ${REPOS.join(', ') || 'None'}`);
   console.log('Bot is running...');
   console.log('========================================');
+}).catch((err) => {
+  // Exit so a supervisor (see entrypoint.sh) can restart the bot
+  console.error('❌ Bot failed to launch:', err.message);
+  process.exit(1);
 });
 
 // Enable graceful stop
