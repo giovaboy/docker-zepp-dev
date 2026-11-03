@@ -15,6 +15,10 @@ const DEFAULT_REPO = process.env.DEFAULT_REPO || '';
 const DEFAULT_DEVICE = process.env.DEFAULT_DEVICE || '';
 const DEFAULT_BRANCH = process.env.DEFAULT_BRANCH || 'main';
 
+// Safety net for build/preview processes; use /abort to stop them earlier
+const PROCESS_TIMEOUT_MS = 100 * 60 * 1000; // 100 minutes
+const PROCESS_TIMEOUT_MINUTES = PROCESS_TIMEOUT_MS / 60000;
+
 if (!BOT_TOKEN) {
   console.error('❌ TELEGRAM_BOT_TOKEN not set in .env file!');
   process.exit(1);
@@ -584,9 +588,9 @@ bot.action(/build:repo:(.+)/, async (ctx) => {
       if (session && session.process && !session.process.killed) {
         session.process.kill();
         activeSessions.delete(chatId);
-        ctx.reply('⏰ Build timeout after 10 minutes');
+        ctx.reply(`⏰ Build timeout after ${PROCESS_TIMEOUT_MINUTES} minutes`);
       }
-    }, 600000); // 10 minutes for build
+    }, PROCESS_TIMEOUT_MS);
 
     // Store process and timeout in session
     session.process = zeus;
@@ -760,9 +764,9 @@ bot.action(/preview:device:(.+)/, async (ctx) => {
       if (session && session.process && !session.process.killed) {
         session.process.kill();
         activeSessions.delete(chatId);
-        ctx.reply('⏰ Preview timeout after 5 minutes');
+        ctx.reply(`⏰ Preview timeout after ${PROCESS_TIMEOUT_MINUTES} minutes`);
       }
-    }, 300000); // 5 minutes
+    }, PROCESS_TIMEOUT_MS);
 
     // Store process and timeout ID in session
     session.process = zeus;
@@ -951,7 +955,7 @@ async function quickPreview(ctx, repo, device) {
   session.timeoutId = setTimeout(() => {
     if (session.process) session.process.kill();
     session.timedOut = true;
-  }, 300000);
+  }, PROCESS_TIMEOUT_MS);
 
   const onSpawn = (proc) => { session.process = proc; };
 
@@ -978,7 +982,7 @@ async function quickPreview(ctx, repo, device) {
     });
     if (session.aborted) return;
     if (session.timedOut) {
-      return setStatus('⏰ Preview timeout after 5 minutes');
+      return setStatus(`⏰ Preview timeout after ${PROCESS_TIMEOUT_MINUTES} minutes`);
     }
     if (prev.code !== 0) {
       return setStatus(`❌ Preview failed with exit code ${prev.code}\n\n${prev.output.slice(-300)}`);

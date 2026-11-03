@@ -14,6 +14,10 @@ const USER = process.env.GITHUB_USER;
 const TOKEN = process.env.GITHUB_TOKEN;
 const PORT = 49000;
 
+// Safety net for build/preview processes; use the Abort button to stop them earlier
+const PROCESS_TIMEOUT_MS = 100 * 60 * 1000; // 100 minutes
+const PROCESS_TIMEOUT_MINUTES = PROCESS_TIMEOUT_MS / 60000;
+
 // Parse multiple repositories from environment variable
 const REPOS = process.env.GITHUB_REPOS
   ? process.env.GITHUB_REPOS.split(',').map(r => r.trim()).filter(Boolean)
@@ -352,9 +356,9 @@ app.post("/build", async (req, res) => {
       console.log(`⏰ Build timeout for ${repo}, killing process`);
       zeusBuild.kill();
       buildStatus.status = 'error';
-      buildStatus.error = 'Build timeout after 5 minutes';
+      buildStatus.error = `Build timeout after ${PROCESS_TIMEOUT_MINUTES} minutes`;
     }
-  }, 300000); // 5 minutes
+  }, PROCESS_TIMEOUT_MS);
 
   // Handle process completion
   zeusBuild.on('close', (code) => {
@@ -1539,15 +1543,15 @@ app.get("/preview", (req, res) => {
   activeProcesses.set(sessionId, zeus);
   console.log(`📝 Registered Zeus process for session: ${sessionId}`);
 
-  // Safety timer: kill process after 5 minutes (300 seconds)
+  // Safety timer: kill process after PROCESS_TIMEOUT_MS
   const killer = setTimeout(() => {
     if (!zeus.killed) {
         zeus.kill();
         activeProcesses.delete(sessionId);
-        res.write("\n\n--- TIMEOUT: Process terminated after 5 minutes. Click 'Back to Setup' to try again. ---");
+        res.write(`\n\n--- TIMEOUT: Process terminated after ${PROCESS_TIMEOUT_MINUTES} minutes. Click 'Back to Setup' to try again. ---`);
         res.end();
     }
-  }, 300000);
+  }, PROCESS_TIMEOUT_MS);
 
   // Handle output
   zeus.stdout.on("data", (data) => {
